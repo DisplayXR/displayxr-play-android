@@ -99,6 +99,13 @@ Verified on a 2560x1600 tablet (45 fps) and a 1080x2400 phone. Shadows, fog, sky
 reflections, the first-person hand and the HUD are correct in both eyes; look-around tracks;
 pause and resume survive.
 
+## Releases
+
+One release per version of the lane. Inside it, one zip per game (the launcher's `mods/` folder,
+ready to copy) and the helper app once. A game's mod carries its own version in its manifest; the
+release version moves whenever any part of the lane changes. A new game shows up as a new zip in the
+next release, never as a separate release line, so the Releases page stays one list.
+
 ## Rules
 
 This project ships no game assets and no game code, and bypasses no store: you own the game, the
