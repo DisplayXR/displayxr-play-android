@@ -35,7 +35,7 @@ The method, with the measurements behind each rule, is in
 
 ## Dependencies
 
-- **LeviLauncher** (the LeviMC community's Android launcher for Minecraft Bedrock), currently 1.6.0. It starts the game with a mod
+- **LeviLauncher** (the LeviMC community's Android launcher for Minecraft Bedrock); mod 0.6.4 is tested with 1.6.0 and 1.7.1. It starts the game with a mod
   loader that preloads native mods declared by a manifest (`"type": "preload-native"`). The mod
   is built against the launcher's preloader SDK; **the SDK must match the launcher build
   exactly** (a mismatch crashes the game at mod registration; pinned in `minecraft/mod/CMakeLists.txt`).
@@ -55,7 +55,12 @@ ninja -C build            # → build/libdisplayxr3d.so
 
 The helper app is a Gradle project in `minecraft/broker/` (`./gradlew assembleRelease`).
 
-## Install (adb over USB, about ten minutes)
+## Install
+
+To install and play on the device itself, follow [`docs/install-minecraft.md`](docs/install-minecraft.md).
+The steps below are the same install over adb, for development.
+
+### Over adb (USB, about ten minutes)
 
 1. Install Minecraft (five split packages) with the Play Store attribution:
    `adb install-multiple -r -i com.android.vending <splits>`.
