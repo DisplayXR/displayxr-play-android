@@ -1,0 +1,163 @@
+name: CI
+
+# Builds the Minecraft Bedrock mod (libdisplayxr3d.so, arm64-v8a) and the helper app
+# (debug-signed apk) the way the README builds them, and checks the mod's manifest and
+# version strings. Artifacts are kept for 7 days; nothing is released from here.
+
+on:
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'minecraft/**'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'minecraft/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to match the project's build notes: NDK 26, arm64-v8a, android-28.
+  NDK_VERSION: 26.3.11579264
+  ANDROID_ABI: arm64-v8a
+  ANDROID_PLATFORM: android-28
+  # The mod includes the OpenXR and XR_DXR_* headers from the runtime repo
+  # (src/external/openxr_includes). Pinned to a runtime tag; bump when the mod needs newer headers.
+  DXR_RUNTIME_REF: v2.70.11
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mod manifest renders to valid JSON; version strings agree
+        shell: python3 {0}
+        run: |
+          import json, pathlib, re, sys
+          mod = pathlib.Path("minecraft/mod")
+          cmake = (mod / "CMakeLists.txt").read_text()
+
+          def cmake_var(name):
+              m = re.search(r'set\(\s*%s\s+"((?:[^"\\]|\\.)*)"' % name, cmake)
+              if not m:
+                  sys.exit(f"::error file=minecraft/mod/CMakeLists.txt::{name} not found")
+              return m.group(1).replace('\\"', '"')
+
+          values = {k: cmake_var(k) for k in
+                    ("MOD_NAME", "MOD_AUTHOR", "MOD_VERSION", "MOD_LIBRARY_NAME",
+                     "MOD_MINECRAFT_VERSIONS", "MOD_ICON")}
+          text = (mod / "manifest.json.in").read_text()
+          text = re.sub(r"@(\w+)@", lambda m: values[m.group(1)], text)
+          try:
+              manifest = json.loads(text)
+          except json.JSONDecodeError as e:
+              sys.exit(f"::error file=minecraft/mod/manifest.json.in::rendered manifest is not JSON: {e}")
+          for key in ("type", "name", "version", "entry", "minecraft_versions"):
+              if key not in manifest:
+                  sys.exit(f"::error file=minecraft/mod/manifest.json.in::missing key '{key}'")
+          if manifest["type"] != "preload-native":
+              sys.exit("::error file=minecraft/mod/manifest.json.in::type must be preload-native")
+          if manifest["entry"] != f"lib{values['MOD_LIBRARY_NAME']}.so":
+              sys.exit("::error file=minecraft/mod/manifest.json.in::entry does not name the built library")
+
+          probe = (mod / "src/Probe.cpp").read_text()
+          m = re.search(r'kVersion\s*=\s*"v?([^"]+)"', probe)
+          if not m:
+              sys.exit("::error file=minecraft/mod/src/Probe.cpp::kVersion not found")
+          if m.group(1) != values["MOD_VERSION"]:
+              sys.exit(f"::error file=minecraft/mod/src/Probe.cpp::kVersion v{m.group(1)} "
+                       f"does not match MOD_VERSION {values['MOD_VERSION']} in CMakeLists.txt")
+          print(f"manifest OK, mod version {values['MOD_VERSION']} consistent")
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the runtime's OpenXR headers
+        uses: actions/checkout@v4
+        with:
+          repository: DisplayXR/displayxr-runtime
+          ref: ${{ env.DXR_RUNTIME_REF }}
+          path: _runtime
+          sparse-checkout: src/external/openxr_includes
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        run: |
+          if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          fi
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          sudo apt-get install -y -qq ninja-build > /dev/null
+
+      - name: Cache CMake FetchContent sources
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fetchcontent
+          key: fetchcontent-${{ hashFiles('minecraft/mod/CMakeLists.txt') }}
+
+      - name: Build the mod library
+        run: |
+          cmake -S minecraft/mod -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="$ANDROID_ABI" -DANDROID_PLATFORM="$ANDROID_PLATFORM" \
+            -DDXR_OPENXR_INCLUDE="$GITHUB_WORKSPACE/_runtime/src/external/openxr_includes" \
+            -DFETCHCONTENT_BASE_DIR="$HOME/.cache/fetchcontent"
+          ninja -C build
+          jq -e . build/manifest.json > /dev/null
+          file build/libdisplayxr3d.so
+
+      - name: Stage the mod in the release layout (mods/ folder)
+        id: stage
+        run: |
+          name=$(jq -r .name build/manifest.json)
+          version=$(jq -r .version build/manifest.json)
+          dir="stage/mods/$name"
+          mkdir -p "$dir"
+          cp build/libdisplayxr3d.so build/manifest.json "$dir/"
+          jq -cn --arg n "$name" '[{name: $n, enabled: true, order: 0}]' > stage/mods/mods_config.json
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          find stage -type f | sort
+
+      - name: Build the helper app (debug-signed)
+        working-directory: minecraft/broker
+        run: ./gradlew assembleDebug
+
+      - name: Upload the mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-bedrock-mod-${{ steps.stage.outputs.version }}-ci
+          path: stage/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload the helper app
+        uses: actions/upload-artifact@v4
+        with:
+          name: displayxr-3d-bridge-debug-ci
+          path: minecraft/broker/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+          if-no-files-found: error
